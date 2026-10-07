@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waiter
+  namespace: kitchen
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single owner of done
+  selector:
+    matchLabels: { app: waiter }
+  template:
+    metadata:
+      labels: { app: waiter }
+    spec:
+      containers:
+      - name: waiter
+        image: ghcr.io/adipresto/cookworker-mq:main
+        env:
+        - { name: ROLE, value: waiter }
+        - name: AMQP_URL
+          valueFrom: { secretKeyRef: { name: mq, key: AMQP_URL } }

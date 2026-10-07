@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cook
+  namespace: kitchen
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: cook }
+  template:
+    metadata:
+      labels: { app: cook }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: cook
+        image: ghcr.io/adipresto/cookworker-mq:main
+        env:
+        - { name: ROLE, value: cook }
+        - name: AMQP_URL
+          valueFrom: { secretKeyRef: { name: mq, key: AMQP_URL } }

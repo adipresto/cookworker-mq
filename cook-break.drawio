@@ -1,0 +1,206 @@
+<mxfile host="app.diagrams.net" pages="4">
+  <diagram name="cook-break" id="cook-break">
+    <mxGraphModel dx="800" dy="500" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="760">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="&lt;b&gt;Cook on break — order can&#39;t be lost (work queue + manual ack + Qos 1)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#ffffff;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="1080" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="&lt;b&gt;Waiter&lt;/b&gt;&#xa;publish persistent&#xa;DeliveryMode=2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="4" value="&lt;b&gt;Default exchange &quot;&quot;&lt;/b&gt;&#xa;direct&#xa;rk = orders" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="260" y="90" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="&lt;b&gt;Queue orders&lt;/b&gt;&#xa;durable=true&#xa;Ready | Unacked" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="480" y="90" width="220" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="&lt;b&gt;Cook A&lt;/b&gt;&#xa;Consume manual&#xa;prefetch=1&#xa;process-then-Ack" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="740" y="90" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="7" value="&lt;b&gt;Cook B&lt;/b&gt;&#xa;Consume manual&#xa;prefetch=1&#xa;idle, takes over" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="940" y="90" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="8" value="&lt;b&gt;Happy:&lt;/b&gt; order → Cook A → done → d.Ack() → slot freed → next order" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="260" width="520" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="9" value="&lt;b&gt;Break:&lt;/b&gt; Cook A holds Unacked + dies → broker requeues → Ready → Cook B gets REDELIVERY" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="600" y="260" width="520" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="10" value="&lt;b&gt;Fail:&lt;/b&gt; 500 → d.Nack(requeue=true) → Ready → retry · 404/bad → d.Nack(requeue=false) → dropped" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="360" width="1080" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="&lt;b&gt;Rule:&lt;/b&gt; durable queue + persistent msg + manual ack + Qos(1) = at-least-once · broker owns retry, handler only returns 200/404/500" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="450" width="1080" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="20" value="publish persistent" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="3" target="4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="21" value="route rk=orders" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="4" target="5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="deliver, 1 at a time" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="5" target="6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="deliver when free" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;dashed=1;" edge="1" parent="1" source="5" target="7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="24" value="Ack / Nack" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="6" target="5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="25" value="close with Unacked → Ready" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;dashed=1;strokeColor=#b85450;fontColor=#b85450;" edge="1" parent="1" source="6" target="5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="why-not" id="why-not">
+    <mxGraphModel dx="800" dy="500" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="760">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="30" value="&lt;b&gt;Why NOT the other patterns in this repo&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#ffffff;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="1080" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="31" value="&lt;b&gt;yochat fanout&lt;/b&gt;&#xa;autoAck=true&#xa;exclusive inbox&#xa;quit = queue gone" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="320" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="32" value="&lt;b&gt;autoAck work queue&lt;/b&gt;&#xa;ack at deliver&#xa;crash after deliver&#xa;= lost" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="420" y="90" width="320" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="33" value="&lt;b&gt;transient publish&lt;/b&gt;&#xa;no DeliveryMode=2&#xa;broker restart&#xa;= lost" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="800" y="90" width="320" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="34" value="&lt;b&gt;Rule of thumb:&lt;/b&gt; chat = fanout + autoAck (loss OK) · orders = work queue + manual ack + persistent (loss NOT ok)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="260" width="1080" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="async-done" id="async-done">
+    <mxGraphModel dx="800" dy="500" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="760">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="50" value="&lt;b&gt;Async return — waiter never blocks (2 work queues, same recipe twice)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#ffffff;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="1080" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="51" value="&lt;b&gt;Waiter&lt;/b&gt;&#xa;publish orders (no wait)&#xa;+ Consume done bg" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="52" value="&lt;b&gt;Default exchange &quot;&quot;&lt;/b&gt;&#xa;rk=orders | rk=done" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="260" y="90" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="53" value="&lt;b&gt;Queue orders&lt;/b&gt;&#xa;durable, persistent&#xa;rk=orders" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="480" y="90" width="200" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="54" value="&lt;b&gt;Cook A/B&lt;/b&gt;&#xa;Qos 1, manual&#xa;competing" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="720" y="90" width="160" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="55" value="&lt;b&gt;Queue done&lt;/b&gt;&#xa;durable, persistent&#xa;rk=done, id=orderId" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="920" y="90" width="200" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="56" value="&lt;b&gt;Cook order:&lt;/b&gt; process → publish done (persistent) → Ack orders · crash between = redelivery → waiter dedupes by orderId" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="40" y="260" width="1080" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="57" value="&lt;b&gt;Waiter order:&lt;/b&gt; publish + keep serving → done arrives in bg → Ack done · no block, no reply_to, no RPC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="340" width="1080" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="60" value="publish orders {id}" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="51" target="52">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="61" value="route rk=orders" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="52" target="53">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="62" value="deliver Qos1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="53" target="54">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="63" value="publish done {id}" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="54" target="55">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="64" value="consume bg + Ack" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;dashed=1;" edge="1" parent="1" source="55" target="51">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="k3s-env" id="k3s-env">
+    <mxGraphModel dx="865" dy="843" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="760" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="70" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#ffffff;fontSize=14;" value="&lt;b&gt;k3s env — 1 waiter + N cooks on k3s, broker outside (stateful stays out)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="40" width="1080" x="40" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="72" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#ffffff;" value="&lt;b&gt;k3s cluster: waiter(1) + cooks(N) + Secret&lt;/b&gt;" vertex="1">
+          <mxGeometry height="30" width="680" x="50" y="78" as="geometry" />
+        </mxCell>
+        <mxCell id="73" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Waiter Deploy&lt;/b&gt;&#xa;replicas: 1, Recreate&#xa;publish orders + consume done&#xa;seen[id] in-mem" vertex="1">
+          <mxGeometry height="130" width="200" x="70" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="74" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Cook Deploy&lt;/b&gt;&#xa;replicas: 2+ (HPA later)&#xa;Qos 1, manual ack&#xa;SIGTERM → close ch" vertex="1">
+          <mxGeometry height="130" width="200" x="70" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="75" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="&lt;b&gt;Secret + Env&lt;/b&gt;&#xa;AMQP_URL, queues&#xa;ExternalName → broker" vertex="1">
+          <mxGeometry height="130" width="180" x="570" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="76" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;dashed=1;" value="&lt;b&gt;Cook pod N&lt;/b&gt;&#xa;same image&#xa;crash → reschedule&#xa;Unacked → Ready" vertex="1">
+          <mxGeometry height="130" width="200" x="70" y="445" as="geometry" />
+        </mxCell>
+        <mxCell id="77" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;b&gt;Broker (outside k3s)&lt;/b&gt;&#xa;rabbitmq:4-mgmt :5672/:15672&#xa;orders + done durable&#xa;volume rabbitmq_data" vertex="1">
+          <mxGeometry height="160" width="280" x="800" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="78" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" value="&lt;b&gt;Why:&lt;/b&gt; broker stateful stays out · cooks scale free via Qos1 · waiter stays 1 so done has one owner · fixed replicas now, KEDA-on-Ready later" vertex="1">
+          <mxGeometry height="60" width="1040" x="40" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="80" edge="1" parent="1" source="75" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;dashed=1;" target="77" value="dial via Secret">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="81" edge="1" parent="1" source="73" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" target="77" value="publish/consume">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="670" y="160" />
+              <mxPoint x="670" y="160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="82" edge="1" parent="1" source="77" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" target="74" value="competing Qos1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="laptop-wsl-now" id="laptop-wsl-now">
+    <mxGraphModel dx="800" dy="500" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="760">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="90" value="&lt;b&gt;Now — laptop (Windows) + WSL2/NixOS k3s, as verified today&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#ffffff;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="1080" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="91" value="&lt;b&gt;Windows 11&lt;/b&gt;&#xa;Docker Desktop&#xa;kubectl v1.34.1 (no cluster)&#xa;worker-mq/ source here" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="300" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="92" value="&lt;b&gt;rabbitmq-rabbitmq-1&lt;/b&gt;&#xa;rabbitmq:4-mgmt&#xa;0.0.0.0:5672 + :15672&#xa;fw: RabbitMQ WSL allow" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="40" y="270" width="300" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="93" value="&lt;b&gt;WSL2 / NixOS&lt;/b&gt;&#xa;k3s v1.35.7 active&#xa;node nixos Ready (1)&#xa;traefik + coredns only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="420" y="90" width="300" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="94" value="&lt;b&gt;kube-system&lt;/b&gt;&#xa;no kitchen ns yet&#xa;k3s.yaml present&#xa;kubectl v1.36.3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="420" y="270" width="300" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="95" value="&lt;b&gt;Link&lt;/b&gt;&#xa;gw 172.28.144.1&#xa;nc 5672 ok · 15672 ok" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="790" y="90" width="290" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="96" value="AMQP_URL=amqp://guest:guest@172.28.144.1:5672/" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="93" target="92">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="97" value="&lt;b&gt;Next:&lt;/b&gt; git push worker-mq → Actions push ghcr.io/adipresto/worker-mq → k3s ctr/kubectl apply kitchen" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="460" width="1040" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
