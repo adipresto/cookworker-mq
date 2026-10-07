@@ -16,6 +16,7 @@ spec:
       containers:
       - name: waiter
         image: ghcr.io/adipresto/cookworker-mq:main
+        imagePullPolicy: Always
         env:
         - { name: ROLE, value: waiter }
         - name: AMQP_URL

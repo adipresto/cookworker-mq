@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,6 +21,11 @@ type Order struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// Request is what the TUI sends the waiter. Waiter owns ids.
+type Request struct {
+	Value string `json:"value"`
+}
+
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -27,17 +33,17 @@ func env(k, def string) string {
 	return def
 }
 
-func dial(url string) (*amqp.Connection, *amqp.Channel, error) {
-	conn, err := amqp.Dial(url)
-	if err != nil {
-		return nil, nil, err
+func envDuration(k string, def time.Duration) time.Duration {
+	if v := os.Getenv(k); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
-	ch, err := conn.Channel()
-	if err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-	return conn, ch, nil
+	return def
+}
+
+func dial(url string) (*amqp.Connection, error) {
+	return amqp.Dial(url)
 }
 
 func declare(ch *amqp.Channel, q string) error {
@@ -45,11 +51,7 @@ func declare(ch *amqp.Channel, q string) error {
 	return err
 }
 
-func publish(ch *amqp.Channel, queue string, o Order) error {
-	body, err := json.Marshal(o)
-	if err != nil {
-		return err
-	}
+func publish(ch *amqp.Channel, queue string, body []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return ch.PublishWithContext(ctx, "", queue, false, false, amqp.Publishing{
@@ -59,8 +61,27 @@ func publish(ch *amqp.Channel, queue string, o Order) error {
 	})
 }
 
+func publishOrder(ch *amqp.Channel, queue string, o Order) error {
+	body, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	return publish(ch, queue, body)
+}
+
 // runCook: Qos1 manual, process -> publish done -> Ack orders.
-func runCook(ch *amqp.Channel, orders, done string) error {
+func runCook(conn *amqp.Connection, orders, done string) error {
+	ch, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+	if err := declare(ch, orders); err != nil {
+		return err
+	}
+	if err := declare(ch, done); err != nil {
+		return err
+	}
 	if err := ch.Qos(1, 0, false); err != nil {
 		return err
 	}
@@ -75,8 +96,11 @@ func runCook(ch *amqp.Channel, orders, done string) error {
 			d.Nack(false, false) // bad message, drop
 			continue
 		}
-		time.Sleep(2 * time.Second) // simulate work
-		if err := publish(ch, done, o); err != nil {
+		// ponytail: 15-90s prep so break-during-work is testable, not instant
+		prep := time.Duration(15+rand.Intn(76)) * time.Second
+		log.Printf("cooking %s %q (%s)", o.ID, o.Value, prep)
+		time.Sleep(prep)
+		if err := publishOrder(ch, done, o); err != nil {
 			d.Nack(false, true) // done not stored, retry
 			continue
 		}
@@ -86,23 +110,75 @@ func runCook(ch *amqp.Channel, orders, done string) error {
 	return nil
 }
 
-// runWaiter: publish one order, then consume done forever (no block on cook).
-func runWaiter(ch *amqp.Channel, orders, done string) error {
-	value := env("ORDER", "nasi goreng")
-	o := Order{
-		ID:        fmt.Sprintf("%s-%d", env("HOSTNAME", "waiter"), time.Now().Unix()),
-		Value:     value,
-		Timestamp: time.Now().Format(time.DateTime),
-	}
-	if err := publish(ch, orders, o); err != nil {
+// runWaiter: turns requests into orders, serves done. Never blocks on cook.
+func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
+	pub, err := conn.Channel() // own channel: concurrent publish while consuming
+	if err != nil {
 		return err
 	}
-	log.Printf("ordered %s %q", o.ID, o.Value)
+	defer pub.Close()
+	sub, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	defer sub.Close()
+	for _, q := range []string{requests, orders, done} {
+		ch := pub
+		if q == done {
+			ch = sub
+		}
+		if err := declare(ch, q); err != nil {
+			return err
+		}
+	}
 
-	if err := ch.Qos(1, 0, false); err != nil {
+	n := 0
+	take := func(value string) {
+		n++
+		o := Order{
+			ID:        fmt.Sprintf("%s-%d-%d", env("HOSTNAME", "waiter"), time.Now().Unix(), n),
+			Value:     value,
+			Timestamp: time.Now().Format(time.DateTime),
+		}
+		if err := publishOrder(pub, orders, o); err != nil {
+			log.Printf("order failed: %v", err)
+			return
+		}
+		log.Printf("ordered %s %q", o.ID, o.Value)
+	}
+
+	// TUI requests -> orders. Request piles in Ready if waiter is down: no loss.
+	reqs, err := sub.Consume(requests, "", false, false, false, false, nil)
+	if err != nil {
 		return err
 	}
-	deliveries, err := ch.Consume(done, "", false, false, false, false, nil)
+	go func() {
+		for d := range reqs {
+			var r Request
+			if err := json.Unmarshal(d.Body, &r); err != nil || r.Value == "" {
+				d.Nack(false, false)
+				continue
+			}
+			take(r.Value)
+			d.Ack(false)
+		}
+	}()
+
+	// Optional auto-order (off unless ORDER_EVERY set, e.g. load test).
+	if every := envDuration("ORDER_EVERY", 0); every > 0 {
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		go func() {
+			for range tick.C {
+				take(env("ORDER", "nasi goreng"))
+			}
+		}()
+	}
+
+	if err := sub.Qos(1, 0, false); err != nil {
+		return err
+	}
+	deliveries, err := sub.Consume(done, "", false, false, false, false, nil)
 	if err != nil {
 		return err
 	}
@@ -126,35 +202,28 @@ func runWaiter(ch *amqp.Channel, orders, done string) error {
 
 func main() {
 	url := env("AMQP_URL", "amqp://guest:guest@172.28.144.1:5672/")
+	requests := env("REQUESTS_QUEUE", "requests")
 	orders := env("ORDERS_QUEUE", "orders")
 	done := env("DONE_QUEUE", "done")
 	role := env("ROLE", "cook")
 
-	conn, ch, err := dial(url)
+	conn, err := dial(url)
 	if err != nil {
 		log.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	defer ch.Close()
-	if err := declare(ch, orders); err != nil {
-		log.Fatalf("declare %s: %v", orders, err)
-	}
-	if err := declare(ch, done); err != nil {
-		log.Fatalf("declare %s: %v", done, err)
-	}
 
-	// SIGTERM (k3s) closes channel: Unacked -> Ready, sibling retries.
+	// SIGTERM (k3s) closes conn: Unacked -> Ready, sibling retries.
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		ch.Close()
 		conn.Close()
 		os.Exit(0)
 	}()
 
 	if role == "waiter" {
-		log.Fatal(runWaiter(ch, orders, done))
+		log.Fatal(runWaiter(conn, requests, orders, done))
 	}
-	log.Fatal(runCook(ch, orders, done))
+	log.Fatal(runCook(conn, orders, done))
 }
