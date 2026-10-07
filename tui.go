@@ -30,8 +30,13 @@ type qstat struct {
 }
 
 type cookStat struct {
-	pod  string
-	line string
+	pod   string
+	line  string // raw last log line
+	state string // cooking | idle
+	order string
+	value string
+	start time.Time
+	prep  time.Duration
 }
 
 type snapshot struct {
@@ -75,6 +80,54 @@ func shortPod(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// parse turns the last log line into a live state.
+// cooking lines look like: 2006/01/02 15:04:05 cooking <id> "value" (45s)
+func (c *cookStat) parse() {
+	c.state = "idle"
+	f := strings.Fields(c.line)
+	if len(f) >= 4 && f[2] == "cooking" {
+		ts, terr := time.Parse("2006/01/02 15:04:05", f[0]+" "+f[1])
+		if i := strings.Index(c.line, "\""); i >= 0 {
+			if j := strings.Index(c.line[i+1:], "\""); j >= 0 {
+				c.value = c.line[i+1 : i+1+j]
+			}
+		}
+		if i := strings.LastIndex(c.line, "("); i >= 0 {
+			if d, err := time.ParseDuration(strings.TrimRight(strings.TrimSpace(c.line[i+1:]), ")")); err == nil {
+				c.prep = d
+			}
+		}
+		if terr == nil && c.prep > 0 {
+			c.start, c.order, c.state = ts, f[3], "cooking"
+		}
+	}
+}
+
+// status renders the countdown live.
+func (c cookStat) status() string {
+	if c.state == "cooking" {
+		left := c.prep - time.Since(c.start)
+		if left < 0 {
+			left = 0
+		}
+		v := c.value
+		if v == "" {
+			v = c.order
+		}
+		return fmt.Sprintf("cooking %q · %ds left", v, int(left.Seconds()))
+	}
+	if c.line == "" {
+		return "(starting…)"
+	}
+	if strings.Contains(c.line, "cooked") {
+		return "idle"
+	}
+	if len(c.line) > 90 {
+		return c.line[:89] + "…"
+	}
+	return c.line
 }
 
 // One wsl call: pods, then per-cook-pod tails, then waiter tail.
@@ -160,6 +213,9 @@ func fetch(api, user, pass string) snapshot {
 	var pods []string
 	pods, s.cooks, s.waiter = getK8s()
 	_ = pods
+	for i := range s.cooks {
+		s.cooks[i].parse()
+	}
 	if len(s.cooks) == 0 && len(s.waiter) == 0 {
 		errs = append(errs, "k3s: no data (namespace missing?)")
 	}
@@ -260,6 +316,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.typing = false
 				m.input.Blur()
 				return m, nil
+			case "ctrl+u":
+				m.input.SetValue("")
+				return m, nil
 			case "enter":
 				return m, m.send
 			}
@@ -297,14 +356,7 @@ func (m model) View() string {
 	if len(m.cur.cooks) > 0 {
 		var lines []string
 		for _, c := range m.cur.cooks {
-			line := c.line
-			if line == "" {
-				line = hintStyle.Render("(starting…)")
-			}
-			if len(line) > 90 {
-				line = line[:89] + "…"
-			}
-			lines = append(lines, c.pod+": "+line)
+			lines = append(lines, c.pod+": "+c.status())
 		}
 		cooks = strings.Join(lines, "\n")
 	}
@@ -328,7 +380,7 @@ func (m model) View() string {
 	if m.loading {
 		s += hintStyle.Render("refreshing…") + "\n"
 	}
-	s += hintStyle.Render("o order · enter send · esc back · r refresh · q quit")
+	s += hintStyle.Render("o order · enter send · esc cancel · ctrl+u clear line · r refresh · q quit")
 	return s
 }
 
@@ -341,7 +393,7 @@ func main() {
 		s := fetch(api, user, pass)
 		fmt.Printf("requests=%d orders: Ready=%d Unacked=%d | done: Ready=%d Unacked=%d\n", s.requests.Ready, s.orders.Ready, s.orders.Unack, s.done.Ready, s.done.Unack)
 		for _, c := range s.cooks {
-			fmt.Printf("cook %s: %s\n", c.pod, c.line)
+			fmt.Printf("cook %s: %s\n", c.pod, c.status())
 		}
 		if s.err != "" {
 			fmt.Println("err: " + s.err)
