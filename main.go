@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -133,7 +134,7 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 	}
 
 	n := 0
-	take := func(value string) {
+	take := func(value string) string {
 		n++
 		o := Order{
 			ID:        fmt.Sprintf("%s-%d-%d", env("HOSTNAME", "waiter"), time.Now().Unix(), n),
@@ -142,10 +143,17 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 		}
 		if err := publishOrder(pub, orders, o); err != nil {
 			log.Printf("order failed: %v", err)
-			return
+			return ""
 		}
 		log.Printf("ordered %s %q", o.ID, o.Value)
+		return o.ID
 	}
+
+	// Waiter pace: one waiter walks every stage serially, like cook prep.
+	reg := envDuration("REGISTER_TIME", 3*time.Second)
+	hand := envDuration("HANDOFF_TIME", 2*time.Second)
+	serve := envDuration("SERVE_TIME", 5*time.Second)
+	back := envDuration("RETURN_TIME", 3*time.Second)
 
 	// TUI requests -> orders. Request piles in Ready if waiter is down: no loss.
 	reqs, err := sub.Consume(requests, "", false, false, false, false, nil)
@@ -159,8 +167,16 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 				d.Nack(false, false)
 				continue
 			}
-			take(r.Value)
+			log.Printf("registering %q (%s)", r.Value, reg)
+			time.Sleep(reg)
+			id := take(r.Value)
+			if id == "" {
+				d.Nack(false, true) // never reached cooks, retry
+				continue
+			}
+			time.Sleep(hand)
 			d.Ack(false)
+			log.Printf("handed %s to cooks", id)
 		}
 	}()
 
@@ -194,8 +210,12 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 			continue
 		}
 		seen[o.ID] = true
+		log.Printf("delivering %s %q to table (%s)", o.ID, o.Value, serve)
+		time.Sleep(serve)
 		d.Ack(false)
 		log.Printf("served %s %q", o.ID, o.Value)
+		time.Sleep(back)
+		log.Printf("ready at server table")
 	}
 	return nil
 }
@@ -207,23 +227,39 @@ func main() {
 	done := env("DONE_QUEUE", "done")
 	role := env("ROLE", "cook")
 
-	conn, err := dial(url)
-	if err != nil {
-		log.Fatalf("dial: %v", err)
-	}
-	defer conn.Close()
-
-	// SIGTERM (k3s) closes conn: Unacked -> Ready, sibling retries.
+	// SIGTERM (k3s) closes the live conn (Unacked -> Ready, sibling retries),
+	// then the process dies. Anything else is a broker blip: redial in-process.
+	var mu sync.Mutex
+	var live *amqp.Connection
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		conn.Close()
+		mu.Lock()
+		if live != nil {
+			live.Close()
+		}
+		mu.Unlock()
 		os.Exit(0)
 	}()
 
-	if role == "waiter" {
-		log.Fatal(runWaiter(conn, requests, orders, done))
+	for {
+		c, err := dial(url)
+		if err != nil {
+			log.Printf("dial: %v (retry in 5s)", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		mu.Lock()
+		live = c
+		mu.Unlock()
+		if role == "waiter" {
+			err = runWaiter(c, requests, orders, done)
+		} else {
+			err = runCook(c, orders, done)
+		}
+		log.Printf("disconnected (%v), redialing...", err)
+		c.Close()
+		time.Sleep(2 * time.Second)
 	}
-	log.Fatal(runCook(conn, orders, done))
 }
