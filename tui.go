@@ -1,7 +1,7 @@
 //go:build ignore
 
-// Kitchen TUI: order like a customer — type a dish, the waiter takes it from here.
-// o type order · enter send to waiter · r refresh · q quit · -once for snapshot.
+// Kitchen TUI: order like a customer, manage cooks like a boss.
+// o order · j/k select cook · x kill · X kill all · +/- scale · R restart · r refresh · q quit · -once snapshot.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,7 +31,8 @@ type qstat struct {
 }
 
 type cookStat struct {
-	pod   string
+	pod   string // short id for display
+	full  string // full pod name for kubectl
 	line  string // raw last log line
 	state string // cooking | idle
 	order string
@@ -45,6 +47,8 @@ type snapshot struct {
 	done     qstat
 	cooks    []cookStat
 	waiter   []string
+	want     int // cook deploy desired replicas
+	ready    string // "ready/want" for cook deploy
 	at       time.Time
 	err      string
 }
@@ -134,7 +138,7 @@ func (c cookStat) status() string {
 // One wsl call: pods, then per-cook-pod tails, then waiter tail.
 // NOTE: runs via temp script FILE — $vars passed in `sh -c "..."` arrive
 // empty through wsl.exe arg forwarding, so never inline them.
-func getK8s() (pods []string, cooks []cookStat, waiter []string) {
+func getK8s() (pods []string, cooks []cookStat, waiter []string, want int, ready string) {
 	script := `K="sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n kitchen"
 $K get pods --no-headers 2>&1
 echo ---COOKS---
@@ -144,14 +148,16 @@ for p in $($K get pods -l app=cook --no-headers -o custom-columns=:metadata.name
 done
 echo ---W---
 $K logs deploy/waiter --tail=6 2>&1
+echo ---DEPLOY---
+$K get deploy cook -o jsonpath='{.spec.replicas} {.status.readyReplicas}' 2>&1
 `
 	tmp, err := os.CreateTemp("", "kitchen-*.sh")
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, 0, ""
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.WriteString(script); err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, 0, ""
 	}
 	tmp.Close()
 	win := tmp.Name()
@@ -164,7 +170,8 @@ $K logs deploy/waiter --tail=6 2>&1
 		t := strings.TrimSpace(ln)
 		if strings.HasPrefix(t, "---POD ") {
 			section = 1
-			cooks = append(cooks, cookStat{pod: shortPod(strings.TrimSuffix(strings.TrimPrefix(t, "---POD "), "---"))})
+			name := strings.TrimSuffix(strings.TrimPrefix(t, "---POD "), "---")
+			cooks = append(cooks, cookStat{pod: shortPod(name), full: name})
 			cur = len(cooks) - 1
 			continue
 		}
@@ -173,6 +180,9 @@ $K logs deploy/waiter --tail=6 2>&1
 			continue
 		case "---W---":
 			section = 2
+			continue
+		case "---DEPLOY---":
+			section = 3
 			continue
 		}
 		if t == "" {
@@ -185,11 +195,22 @@ $K logs deploy/waiter --tail=6 2>&1
 			if cur >= 0 {
 				cooks[cur].line = ln // last line wins = what the cook is doing now
 			}
-		default:
+		case 2:
 			waiter = append(waiter, ln)
+		default: // deploy: "want ready"
+			if f := strings.Fields(t); len(f) >= 1 {
+				if n, err := strconv.Atoi(f[0]); err == nil {
+					want = n
+					r := "0"
+					if len(f) >= 2 {
+						r = f[1]
+					}
+					ready = r + "/" + f[0]
+				}
+			}
 		}
 	}
-	return pods, cooks, waiter
+	return pods, cooks, waiter, want, ready
 }
 
 func fetch(api, user, pass string) snapshot {
@@ -211,7 +232,7 @@ func fetch(api, user, pass string) snapshot {
 		}
 	}
 	var pods []string
-	pods, s.cooks, s.waiter = getK8s()
+	pods, s.cooks, s.waiter, s.want, s.ready = getK8s()
 	_ = pods
 	for i := range s.cooks {
 		s.cooks[i].parse()
@@ -269,6 +290,21 @@ type sentMsg struct {
 	dish string
 	err  error
 }
+type actionMsg struct {
+	msg string
+	err error
+}
+
+// kctl runs kubectl in WSL with no shell (avoids wsl.exe $var forwarding loss).
+func kctl(note string, args ...string) tea.Cmd {
+	return func() tea.Msg {
+		full := append([]string{"-d", "NixOS", "--", "sudo", "kubectl", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml", "-n", "kitchen"}, args...)
+		if out, err := exec.Command("wsl", full...).CombinedOutput(); err != nil {
+			return actionMsg{err: fmt.Errorf("%s", strings.TrimSpace(string(out)))}
+		}
+		return actionMsg{msg: note}
+	}
+}
 
 type model struct {
 	api, user, pass, amqpURL string
@@ -277,6 +313,7 @@ type model struct {
 	typing                  bool
 	loading                 bool
 	notice                  string
+	sel                     int // selected cook
 }
 
 func (m model) Init() tea.Cmd { return m.refresh }
@@ -294,6 +331,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case dataMsg:
 		m.cur, m.loading = msg.s, false
+		if m.sel >= len(m.cur.cooks) {
+			m.sel = max(len(m.cur.cooks)-1, 0)
+		}
 		return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
 	case tickMsg:
 		m.loading = true
@@ -307,6 +347,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.typing = false
 		m.input.Blur()
+		m.loading = true
+		return m, m.refresh
+	case actionMsg:
+		if msg.err != nil {
+			m.notice = "action failed: " + msg.err.Error()
+		} else {
+			m.notice = msg.msg
+		}
 		m.loading = true
 		return m, m.refresh
 	case tea.KeyMsg:
@@ -336,6 +384,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.typing = true
 			m.notice = ""
 			return m, m.input.Focus()
+		case "j", "down":
+			if m.sel < len(m.cur.cooks)-1 {
+				m.sel++
+			}
+		case "k", "up":
+			if m.sel > 0 {
+				m.sel--
+			}
+		case "x":
+			if len(m.cur.cooks) == 0 {
+				m.notice = "no cooks to kill"
+				return m, nil
+			}
+			c := m.cur.cooks[m.sel]
+			return m, kctl("killed "+c.pod, "delete", "pod/"+c.full, "--wait=false")
+		case "X":
+			return m, kctl("killed all cooks", "delete", "pods", "-l", "app=cook", "--wait=false")
+		case "+", "=":
+			if m.cur.want >= 5 {
+				m.notice = "already at max 5 cooks"
+				return m, nil
+			}
+			return m, kctl("scaled up", "scale", "deploy/cook", fmt.Sprintf("--replicas=%d", m.cur.want+1))
+		case "-", "_":
+			if m.cur.want <= 0 {
+				m.notice = "already at 0 cooks"
+				return m, nil
+			}
+			return m, kctl("scaled down", "scale", "deploy/cook", fmt.Sprintf("--replicas=%d", m.cur.want-1))
+		case "R":
+			return m, kctl("restarted cooks", "rollout", "restart", "deploy/cook")
 		}
 	}
 	return m, nil
@@ -355,12 +434,20 @@ func (m model) View() string {
 	cooks := "(no cooks)"
 	if len(m.cur.cooks) > 0 {
 		var lines []string
-		for _, c := range m.cur.cooks {
-			lines = append(lines, c.pod+": "+c.status())
+		for i, c := range m.cur.cooks {
+			cur := "  "
+			if i == m.sel {
+				cur = "> "
+			}
+			lines = append(lines, cur+c.pod+": "+c.status())
 		}
 		cooks = strings.Join(lines, "\n")
 	}
-	s += boxStyle.Render("COOKS — what they're doing now\n"+cooks) + "\n"
+	deploy := "cook deploy"
+	if m.cur.ready != "" {
+		deploy = fmt.Sprintf("cook deploy: %s ready (want %d)", m.cur.ready, m.cur.want)
+	}
+	s += boxStyle.Render("COOKS — "+deploy+"\n"+cooks) + "\n"
 	ev := strings.Join(m.cur.waiter, "\n")
 	if ev == "" {
 		ev = "(nothing yet)"
@@ -380,7 +467,7 @@ func (m model) View() string {
 	if m.loading {
 		s += hintStyle.Render("refreshing…") + "\n"
 	}
-	s += hintStyle.Render("o order · enter send · esc cancel · ctrl+u clear line · r refresh · q quit")
+	s += hintStyle.Render("o order · j/k select cook · x kill · X kill all · +/- scale · R restart · r refresh · q quit")
 	return s
 }
 
@@ -392,6 +479,7 @@ func main() {
 	if *once {
 		s := fetch(api, user, pass)
 		fmt.Printf("requests=%d orders: Ready=%d Unacked=%d | done: Ready=%d Unacked=%d\n", s.requests.Ready, s.orders.Ready, s.orders.Unack, s.done.Ready, s.done.Unack)
+		fmt.Printf("cook deploy: %s ready (want %d)\n", s.ready, s.want)
 		for _, c := range s.cooks {
 			fmt.Printf("cook %s: %s\n", c.pod, c.status())
 		}
