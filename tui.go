@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -41,14 +42,21 @@ type cookStat struct {
 	prep  time.Duration
 }
 
+type orderItem struct {
+	id    string
+	value string
+}
+
 type snapshot struct {
 	requests qstat
 	orders   qstat
 	done     qstat
 	cooks    []cookStat
 	waiter   []string
-	want     int // cook deploy desired replicas
-	ready    string // "ready/want" for cook deploy
+	waiting  []orderItem // orders queue Ready: registered, no free cook
+	ready    []orderItem // done queue Ready: cooked, waiter hasn't picked up
+	want     int         // cook deploy desired replicas
+	readyN   string      // "ready/want" for cook deploy
 	at       time.Time
 	err      string
 }
@@ -77,6 +85,44 @@ func getQueue(api, user, pass, q string) (qstat, error) {
 		return s, fmt.Errorf("%s: %s", q, strings.TrimSpace(string(body)))
 	}
 	return s, json.Unmarshal(body, &s)
+}
+
+// peekQueue lists Ready payloads without consuming (ack_requeue_true).
+func peekQueue(api, user, pass, q string, count int) []orderItem {
+	body, _ := json.Marshal(map[string]any{"count": count, "ackmode": "ack_requeue_true", "encoding": "auto", "truncate": 50000})
+	req, err := http.NewRequest("POST", strings.TrimRight(api, "/")+"/api/queues/%2F/"+q+"/get", bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	req.SetBasicAuth(user, pass)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	var msgs []struct {
+		Payload string `json:"payload"`
+	}
+	if err := json.Unmarshal(raw, &msgs); err != nil {
+		return nil
+	}
+	var out []orderItem
+	for _, m := range msgs {
+		var o struct {
+			ID    string `json:"id"`
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(m.Payload), &o); err != nil || o.ID == "" {
+			continue
+		}
+		out = append(out, orderItem{id: o.ID, value: o.Value})
+	}
+	return out
 }
 
 func shortPod(p string) string {
@@ -232,11 +278,13 @@ func fetch(api, user, pass string) snapshot {
 		}
 	}
 	var pods []string
-	pods, s.cooks, s.waiter, s.want, s.ready = getK8s()
+	pods, s.cooks, s.waiter, s.want, s.readyN = getK8s()
 	_ = pods
 	for i := range s.cooks {
 		s.cooks[i].parse()
 	}
+	s.waiting = peekQueue(api, user, pass, "orders", 20)
+	s.ready = peekQueue(api, user, pass, "done", 20)
 	if len(s.cooks) == 0 && len(s.waiter) == 0 {
 		errs = append(errs, "k3s: no data (namespace missing?)")
 	}
@@ -308,12 +356,12 @@ func kctl(note string, args ...string) tea.Cmd {
 
 type model struct {
 	api, user, pass, amqpURL string
-	cur                     snapshot
-	input                   textinput.Model
-	typing                  bool
-	loading                 bool
-	notice                  string
-	sel                     int // selected cook
+	cur                      snapshot
+	input                    textinput.Model
+	typing                   bool
+	loading                  bool
+	notice                   string
+	sel                      int // selected cook
 }
 
 func (m model) Init() tea.Cmd { return m.refresh }
@@ -427,10 +475,61 @@ func qline(s qstat) string {
 	return fmt.Sprintf("%-8s Ready=%-4d Unacked=%-4d", s.Name, s.Ready, s.Unack)
 }
 
+func shortID(id string) string {
+	if len(id) > 18 {
+		return "…" + id[len(id)-15:]
+	}
+	return id
+}
+
+func orderLine(o orderItem) string {
+	if o.value == "" {
+		return shortID(o.id)
+	}
+	return fmt.Sprintf("%q (%s)", o.value, shortID(o.id))
+}
+
 func (m model) View() string {
 	s := titleStyle.Render("Kitchen — order here, waiter runs it") + "\n"
 	s += hintStyle.Render(fmt.Sprintf("updated %s", m.cur.at.Format("15:04:05"))) + "\n"
 	s += boxStyle.Render("QUEUES\n"+qline(m.cur.requests)+"\n"+qline(m.cur.orders)+"\n"+qline(m.cur.done)) + "\n"
+	// Orders by lifecycle stage.
+	var wt, ck, rd []string
+	for _, o := range m.cur.waiting {
+		wt = append(wt, "· "+orderLine(o))
+	}
+	for _, c := range m.cur.cooks {
+		if c.state == "cooking" {
+			v := c.value
+			if v == "" {
+				v = c.order
+			}
+			ck = append(ck, fmt.Sprintf("· %q (%s) @%s", v, shortID(c.order), c.pod))
+		}
+	}
+	for _, o := range m.cur.ready {
+		rd = append(rd, "· "+orderLine(o))
+	}
+	if len(wt) == 0 {
+		wt = []string{"(none)"}
+	}
+	if len(ck) == 0 {
+		ck = []string{"(none)"}
+	}
+	if len(rd) == 0 {
+		rd = []string{"(none)"}
+	}
+	if extra := m.cur.orders.Ready - len(m.cur.waiting); extra > 0 {
+		wt = append(wt, fmt.Sprintf("+%d more…", extra))
+	}
+	if extra := m.cur.orders.Unack - len(ck); extra > 0 {
+		ck = append(ck, fmt.Sprintf("+%d more…", extra))
+	}
+	if extra := m.cur.done.Ready - len(m.cur.ready); extra > 0 {
+		rd = append(rd, fmt.Sprintf("+%d more…", extra))
+	}
+	s += boxStyle.Render(fmt.Sprintf("ORDERS — waiting:%d cooking:%d ready:%d\nWAITING (orders Ready)\n%s\nCOOKING (orders Unacked)\n%s\nREADY FOR WAITER (done Ready, serving Unacked=%d)\n%s",
+		m.cur.orders.Ready, m.cur.orders.Unack, m.cur.done.Ready, strings.Join(wt, "\n"), strings.Join(ck, "\n"), m.cur.done.Unack, strings.Join(rd, "\n"))) + "\n"
 	cooks := "(no cooks)"
 	if len(m.cur.cooks) > 0 {
 		var lines []string
@@ -444,8 +543,8 @@ func (m model) View() string {
 		cooks = strings.Join(lines, "\n")
 	}
 	deploy := "cook deploy"
-	if m.cur.ready != "" {
-		deploy = fmt.Sprintf("cook deploy: %s ready (want %d)", m.cur.ready, m.cur.want)
+	if m.cur.readyN != "" {
+		deploy = fmt.Sprintf("cook deploy: %s ready (want %d)", m.cur.readyN, m.cur.want)
 	}
 	s += boxStyle.Render("COOKS — "+deploy+"\n"+cooks) + "\n"
 	ev := strings.Join(m.cur.waiter, "\n")
@@ -479,7 +578,25 @@ func main() {
 	if *once {
 		s := fetch(api, user, pass)
 		fmt.Printf("requests=%d orders: Ready=%d Unacked=%d | done: Ready=%d Unacked=%d\n", s.requests.Ready, s.orders.Ready, s.orders.Unack, s.done.Ready, s.done.Unack)
-		fmt.Printf("cook deploy: %s ready (want %d)\n", s.ready, s.want)
+		fmt.Printf("cook deploy: %s ready (want %d)\n", s.readyN, s.want)
+		fmt.Printf("waiting (%d):\n", s.orders.Ready)
+		for _, o := range s.waiting {
+			fmt.Printf("  - %s\n", orderLine(o))
+		}
+		fmt.Printf("cooking (%d):\n", s.orders.Unack)
+		for _, c := range s.cooks {
+			if c.state == "cooking" {
+				v := c.value
+				if v == "" {
+					v = c.order
+				}
+				fmt.Printf("  - %q (%s) @%s\n", v, shortID(c.order), c.pod)
+			}
+		}
+		fmt.Printf("ready for waiter (%d):\n", s.done.Ready)
+		for _, o := range s.ready {
+			fmt.Printf("  - %s\n", orderLine(o))
+		}
 		for _, c := range s.cooks {
 			fmt.Printf("cook %s: %s\n", c.pod, c.status())
 		}
