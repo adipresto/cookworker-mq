@@ -489,16 +489,14 @@ func orderLine(o orderItem) string {
 	return fmt.Sprintf("%q (%s)", o.value, shortID(o.id))
 }
 
-func (m model) View() string {
-	s := titleStyle.Render("Kitchen — order here, waiter runs it") + "\n"
-	s += hintStyle.Render(fmt.Sprintf("updated %s", m.cur.at.Format("15:04:05"))) + "\n"
-	s += boxStyle.Render("QUEUES\n"+qline(m.cur.requests)+"\n"+qline(m.cur.orders)+"\n"+qline(m.cur.done)) + "\n"
+// renderOrders groups the live order lifecycle: waiting, cooking, ready.
+func renderOrders(cur snapshot) string {
 	// Orders by lifecycle stage.
 	var wt, ck, rd []string
-	for _, o := range m.cur.waiting {
+	for _, o := range cur.waiting {
 		wt = append(wt, "· "+orderLine(o))
 	}
-	for _, c := range m.cur.cooks {
+	for _, c := range cur.cooks {
 		if c.state == "cooking" {
 			v := c.value
 			if v == "" {
@@ -507,7 +505,7 @@ func (m model) View() string {
 			ck = append(ck, fmt.Sprintf("· %q (%s) @%s", v, shortID(c.order), c.pod))
 		}
 	}
-	for _, o := range m.cur.ready {
+	for _, o := range cur.ready {
 		rd = append(rd, "· "+orderLine(o))
 	}
 	if len(wt) == 0 {
@@ -519,17 +517,24 @@ func (m model) View() string {
 	if len(rd) == 0 {
 		rd = []string{"(none)"}
 	}
-	if extra := m.cur.orders.Ready - len(m.cur.waiting); extra > 0 {
+	if extra := cur.orders.Ready - len(cur.waiting); extra > 0 {
 		wt = append(wt, fmt.Sprintf("+%d more…", extra))
 	}
-	if extra := m.cur.orders.Unack - len(ck); extra > 0 {
+	if extra := cur.orders.Unack - len(ck); extra > 0 {
 		ck = append(ck, fmt.Sprintf("+%d more…", extra))
 	}
-	if extra := m.cur.done.Ready - len(m.cur.ready); extra > 0 {
+	if extra := cur.done.Ready - len(cur.ready); extra > 0 {
 		rd = append(rd, fmt.Sprintf("+%d more…", extra))
 	}
-	s += boxStyle.Render(fmt.Sprintf("ORDERS — waiting:%d cooking:%d ready:%d\nWAITING (orders Ready)\n%s\nCOOKING (orders Unacked)\n%s\nREADY FOR WAITER (done Ready, serving Unacked=%d)\n%s",
-		m.cur.orders.Ready, m.cur.orders.Unack, m.cur.done.Ready, strings.Join(wt, "\n"), strings.Join(ck, "\n"), m.cur.done.Unack, strings.Join(rd, "\n"))) + "\n"
+	return boxStyle.Render(fmt.Sprintf("ORDERS — waiting:%d cooking:%d ready:%d\nWAITING (orders Ready)\n%s\nCOOKING (orders Unacked)\n%s\nREADY FOR WAITER (done Ready, serving Unacked=%d)\n%s",
+		cur.orders.Ready, cur.orders.Unack, cur.done.Ready, strings.Join(wt, "\n"), strings.Join(ck, "\n"), cur.done.Unack, strings.Join(rd, "\n")))
+}
+
+func (m model) View() string {
+	s := titleStyle.Render("Kitchen — order here, waiter runs it") + "\n"
+	s += hintStyle.Render(fmt.Sprintf("updated %s", m.cur.at.Format("15:04:05"))) + "\n"
+	s += boxStyle.Render("QUEUES\n"+qline(m.cur.requests)+"\n"+qline(m.cur.orders)+"\n"+qline(m.cur.done)) + "\n"
+	s += renderOrders(m.cur) + "\n"
 	cooks := "(no cooks)"
 	if len(m.cur.cooks) > 0 {
 		var lines []string
