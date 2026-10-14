@@ -23,7 +23,7 @@ public partial class MainWindow : Window
             Env("RABBIT_USER", "guest"),
             Env("RABBIT_PASS", "guest"),
             Env("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
-            Env("MANAGER_URL", "http://172.28.144.1:30080"));
+            Env("MANAGER_URL", "http://172.28.151.33:30080"));
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
         _svc.StartStateListener(() => Dispatcher.InvokeAsync(RefreshAsync));

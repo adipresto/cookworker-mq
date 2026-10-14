@@ -715,7 +715,7 @@ func main() {
 	flag.Parse()
 	api, user, pass := getenv("RABBIT_API", "http://localhost:15672"), getenv("RABBIT_USER", "guest"), getenv("RABBIT_PASS", "guest")
 	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
-	managerURL := getenv("MANAGER_URL", "http://172.28.144.1:30080")
+	managerURL := getenv("MANAGER_URL", "http://172.28.151.33:30080")
 	if *once {
 		s := fetch(api, user, pass, managerURL)
 		fmt.Printf("requests=%d orders: Ready=%d Unacked=%d | done: Ready=%d Unacked=%d\n", s.requests.Ready, s.orders.Ready, s.orders.Unack, s.done.Ready, s.done.Unack)
