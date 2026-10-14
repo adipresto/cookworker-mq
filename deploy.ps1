@@ -24,4 +24,10 @@ k rollout restart deploy/cook deploy/waiter deploy/manager -n kitchen # :main ta
 k rollout status deploy/cook -n kitchen --timeout=120s
 k rollout status deploy/waiter -n kitchen --timeout=120s
 k rollout status deploy/manager -n kitchen --timeout=120s
+# Manager NodePort lives on the WSL node IP (dynamic), not the gateway.
+# Persist it so Windows clients (TUI/WPF MANAGER_URL) find it after WSL restarts.
+$wslIp = ((wsl -d $Distro -- hostname -I).Split(' ', [StringSplitOptions]::RemoveEmptyEntries) | Select-Object -First 1)
+[Environment]::SetEnvironmentVariable("MANAGER_URL", "http://${wslIp}:30080", "User")
+$env:MANAGER_URL = "http://${wslIp}:30080"
+"MANAGER_URL=http://${wslIp}:30080 (persisted to user env)"
 k get pods -n kitchen
