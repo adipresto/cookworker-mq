@@ -2,3 +2,5 @@
 /bin/
 /app
 graphify-out/
+kitchen-wpf/bin/
+kitchen-wpf/obj/

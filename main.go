@@ -62,6 +62,35 @@ func publish(ch *amqp.Channel, queue string, body []byte) error {
 	})
 }
 
+// StateEvent is the fanout state announcer. Clients listen, never kubectl.
+// ponytail: deploy want/ready derived client-side (distinct pods seen + last scale action);
+// publish real deploy via in-cluster API if out-of-band scales matter.
+type StateEvent struct {
+	Pod   string `json:"pod"`
+	Role  string `json:"role"` // cook | waiter
+	State string `json:"state"`
+	Order string `json:"order,omitempty"`
+	Value string `json:"value,omitempty"`
+	Prep  string `json:"prep,omitempty"`
+	At    string `json:"at"`
+}
+
+const stateExchange = "kitchen.state"
+
+func ensureState(ch *amqp.Channel) {
+	_ = ch.ExchangeDeclare(stateExchange, "fanout", true, false, false, false, nil)
+}
+
+func publishState(ch *amqp.Channel, e StateEvent) {
+	e.At = time.Now().Format(time.DateTime)
+	body, _ := json.Marshal(e)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = ch.PublishWithContext(ctx, stateExchange, "", false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Body:        body,
+	})
+}
 func publishOrder(ch *amqp.Channel, queue string, o Order) error {
 	body, err := json.Marshal(o)
 	if err != nil {
@@ -86,6 +115,8 @@ func runCook(conn *amqp.Connection, orders, done string) error {
 	if err := ch.Qos(1, 0, false); err != nil {
 		return err
 	}
+	ensureState(ch)
+	pod := env("HOSTNAME", "cook")
 	deliveries, err := ch.Consume(orders, "", false, false, false, false, nil)
 	if err != nil {
 		return err
@@ -100,12 +131,14 @@ func runCook(conn *amqp.Connection, orders, done string) error {
 		// ponytail: 15-90s prep so break-during-work is testable, not instant
 		prep := time.Duration(15+rand.Intn(76)) * time.Second
 		log.Printf("cooking %s %q (%s)", o.ID, o.Value, prep)
+		publishState(ch, StateEvent{Pod: pod, Role: "cook", State: "cooking", Order: o.ID, Value: o.Value, Prep: prep.String()})
 		time.Sleep(prep)
 		if err := publishOrder(ch, done, o); err != nil {
 			d.Nack(false, true) // done not stored, retry
 			continue
 		}
 		d.Ack(false)
+		publishState(ch, StateEvent{Pod: pod, Role: "cook", State: "idle", Order: o.ID, Value: o.Value})
 		log.Printf("cooked %s", o.ID)
 	}
 	return nil
@@ -134,6 +167,7 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 	}
 
 	// Fanout broadcasts (menu.86 / shop.close): one inbox bound to both.
+	ensureState(pub)
 	if _, err := pub.QueueDeclare("notify-tui", true, false, false, false, nil); err != nil {
 		return err
 	}
@@ -212,6 +246,7 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 		return err
 	}
 	seen := map[string]bool{} // ponytail: in-mem dedupe, persistent store if waiter restarts matter
+	wpod := env("HOSTNAME", "waiter")
 	for d := range deliveries {
 		var o Order
 		if err := json.Unmarshal(d.Body, &o); err != nil {
@@ -224,10 +259,13 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 		}
 		seen[o.ID] = true
 		log.Printf("delivering %s %q to table (%s)", o.ID, o.Value, serve)
+		publishState(pub, StateEvent{Pod: wpod, Role: "waiter", State: "delivering", Order: o.ID, Value: o.Value})
 		time.Sleep(serve)
 		d.Ack(false)
+		publishState(pub, StateEvent{Pod: wpod, Role: "waiter", State: "served", Order: o.ID, Value: o.Value})
 		log.Printf("served %s %q", o.ID, o.Value)
 		time.Sleep(back)
+		publishState(pub, StateEvent{Pod: wpod, Role: "waiter", State: "ready"})
 		log.Printf("ready at server table")
 	}
 	return nil

@@ -14,8 +14,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -133,30 +133,7 @@ func shortPod(p string) string {
 	return p
 }
 
-// parse turns the last log line into a live state.
-// cooking lines look like: 2006/01/02 15:04:05 cooking <id> "value" (45s)
-func (c *cookStat) parse() {
-	c.state = "idle"
-	f := strings.Fields(c.line)
-	if len(f) >= 4 && f[2] == "cooking" {
-		ts, terr := time.Parse("2006/01/02 15:04:05", f[0]+" "+f[1])
-		if i := strings.Index(c.line, "\""); i >= 0 {
-			if j := strings.Index(c.line[i+1:], "\""); j >= 0 {
-				c.value = c.line[i+1 : i+1+j]
-			}
-		}
-		if i := strings.LastIndex(c.line, "("); i >= 0 {
-			if d, err := time.ParseDuration(strings.TrimRight(strings.TrimSpace(c.line[i+1:]), ")")); err == nil {
-				c.prep = d
-			}
-		}
-		if terr == nil && c.prep > 0 {
-			c.start, c.order, c.state = ts, f[3], "cooking"
-		}
-	}
-}
-
-// status renders the countdown live.
+// status renders the countdown live from kitchen.state events (no log parsing).
 func (c cookStat) status() string {
 	if c.state == "cooking" {
 		left := c.prep - time.Since(c.start)
@@ -181,85 +158,110 @@ func (c cookStat) status() string {
 	return c.line
 }
 
-// One wsl call: pods, then per-cook-pod tails, then waiter tail.
-// One wsl call: pods, then per-cook-pod tails, then waiter tail.
-// NOTE: runs via temp script FILE — $vars passed in `sh -c "..."` arrive
-// empty through wsl.exe arg forwarding, so never inline them.
-func getK8s() (pods []string, cooks []cookStat, waiter []string, want int, ready string) {
-	script := `K="sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n kitchen"
-$K get pods --no-headers 2>&1
-echo ---COOKS---
-for p in $($K get pods -l app=cook --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-  echo ---POD $p---
-  $K logs pod/$p --tail=4 2>&1
-done
-echo ---W---
-$K logs deploy/waiter --tail=6 2>&1
-echo ---DEPLOY---
-$K get deploy cook -o jsonpath='{.spec.replicas} {.status.readyReplicas}' 2>&1
-`
-	tmp, err := os.CreateTemp("", "kitchen-*.sh")
-	if err != nil {
-		return nil, nil, nil, 0, ""
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(script); err != nil {
-		return nil, nil, nil, 0, ""
-	}
-	tmp.Close()
-	win := tmp.Name()
-	wslPath := "/mnt/" + strings.ToLower(string(win[0])) + strings.ReplaceAll(win[2:], `\`, "/")
-	out, _ := exec.Command("wsl", "-d", "NixOS", "--", "sh", wslPath).CombinedOutput()
-	section := 0
-	cur := -1
-	for _, ln := range strings.Split(string(out), "\n") {
-		ln = strings.TrimRight(ln, "\r")
-		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, "---POD ") {
-			section = 1
-			name := strings.TrimSuffix(strings.TrimPrefix(t, "---POD "), "---")
-			cooks = append(cooks, cookStat{pod: shortPod(name), full: name})
-			cur = len(cooks) - 1
-			continue
-		}
-		switch t {
-		case "---COOKS---":
-			continue
-		case "---W---":
-			section = 2
-			continue
-		case "---DEPLOY---":
-			section = 3
-			continue
-		}
-		if t == "" {
-			continue
-		}
-		switch section {
-		case 0:
-			pods = append(pods, ln)
-		case 1:
-			if cur >= 0 {
-				cooks[cur].line = ln // last line wins = what the cook is doing now
-			}
-		case 2:
-			waiter = append(waiter, ln)
-		default: // deploy: "want ready"
-			if f := strings.Fields(t); len(f) >= 1 {
-				if n, err := strconv.Atoi(f[0]); err == nil {
-					want = n
-					r := "0"
-					if len(f) >= 2 {
-						r = f[1]
-					}
-					ready = r + "/" + f[0]
-				}
-			}
-		}
-	}
-	return pods, cooks, waiter, want, ready
+// StateEvent mirrors main.go: fanout state announcer. Clients listen, never kubectl.
+// ponytail: deploy want/ready derived client-side; real deploy via in-cluster API if out-of-band scales matter.
+type StateEvent struct {
+	Pod   string `json:"pod"`
+	Role  string `json:"role"`
+	State string `json:"state"`
+	Order string `json:"order"`
+	Value string `json:"value"`
+	Prep  string `json:"prep"`
+	At    string `json:"at"`
 }
 
+var (
+	stateMu     sync.Mutex
+	stateCooks  = map[string]*cookStat{}
+	stateWaiter []string
+	stateWant   int
+)
+
+func applyState(e StateEvent) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	at, err := time.Parse(time.DateTime, e.At)
+	if err != nil {
+		at = time.Now()
+	}
+	switch e.Role {
+	case "cook":
+		c := stateCooks[e.Pod]
+		if c == nil {
+			c = &cookStat{pod: shortPod(e.Pod), full: e.Pod}
+			stateCooks[e.Pod] = c
+		}
+		if e.State == "cooking" {
+			c.state, c.order, c.value, c.start = "cooking", e.Order, e.Value, at
+			if d, err := time.ParseDuration(e.Prep); err == nil {
+				c.prep = d
+			}
+			c.line = "cooking"
+		} else {
+			c.state, c.line = "idle", "cooked "+e.Order
+		}
+		if stateWant == 0 {
+			stateWant = len(stateCooks)
+		}
+	case "waiter":
+		line := e.At + " " + e.State
+		if e.Value != "" {
+			line += " " + e.Value
+		} else if e.Order != "" {
+			line += " " + shortID(e.Order)
+		}
+		stateWaiter = append(stateWaiter, line)
+		if len(stateWaiter) > 6 {
+			stateWaiter = stateWaiter[len(stateWaiter)-6:]
+		}
+	}
+}
+
+// listenState subscribes to kitchen.state fanout, forwards into the TUI. No kubectl, no wsl.
+func listenState(amqpURL string, send func(tea.Msg)) {
+	for {
+		conn, err := amqp.Dial(amqpURL)
+		if err != nil {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		ch, err := conn.Channel()
+		if err != nil {
+			conn.Close()
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		_ = ch.ExchangeDeclare("kitchen.state", "fanout", true, false, false, false, nil)
+		q, err := ch.QueueDeclare("", false, true, true, false, nil)
+		if err != nil {
+			ch.Close()
+			conn.Close()
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		_ = ch.QueueBind(q.Name, "", "kitchen.state", false, nil)
+		msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+		if err != nil {
+			ch.Close()
+			conn.Close()
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		for m := range msgs {
+			var e StateEvent
+			if err := json.Unmarshal(m.Body, &e); err == nil && e.Pod != "" {
+				applyState(e)
+				send(stateMsg{})
+			}
+		}
+		ch.Close()
+		conn.Close()
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// State reads come from kitchen.state fanout (see listenState/applyState).
+// kctl below is ACTIONS only (x/X/+/-/R): writes still need kubectl.
 func fetch(api, user, pass string) snapshot {
 	s := snapshot{at: time.Now()}
 	var errs []string
@@ -278,17 +280,24 @@ func fetch(api, user, pass string) snapshot {
 			s.done = st
 		}
 	}
-	var pods []string
-	pods, s.cooks, s.waiter, s.want, s.readyN = getK8s()
-	_ = pods
-	for i := range s.cooks {
-		s.cooks[i].parse()
+	stateMu.Lock()
+	for _, c := range stateCooks {
+		cp := *c
+		s.cooks = append(s.cooks, cp)
 	}
+	s.waiter = append([]string(nil), stateWaiter...)
+	s.want = stateWant
+	if s.want == 0 {
+		s.want = len(s.cooks)
+	}
+	ready := len(s.cooks)
+	s.readyN = fmt.Sprintf("%d/%d", ready, s.want)
+	stateMu.Unlock()
 	s.waiting = peekQueue(api, user, pass, "orders", 20)
 	s.ready = peekQueue(api, user, pass, "done", 20)
 	s.alerts = peekQueue(api, user, pass, "notify-tui", 10)
 	if len(s.cooks) == 0 && len(s.waiter) == 0 {
-		errs = append(errs, "k3s: no data (namespace missing?)")
+		errs = append(errs, "state: waiting for kitchen.state events…")
 	}
 	s.err = strings.Join(errs, " · ")
 	return s
@@ -364,6 +373,7 @@ var (
 )
 
 type tickMsg struct{}
+type stateMsg struct{} // kitchen.state event arrived; store already updated, just re-render
 type dataMsg struct{ s snapshot }
 type sentMsg struct {
 	dish string
@@ -423,6 +433,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sel = max(len(m.cur.cooks)-1, 0)
 		}
 		return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+	case stateMsg:
+		m.loading = true
+		return m, m.refresh
 	case tickMsg:
 		m.loading = true
 		return m, m.refresh
@@ -501,12 +514,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.notice = "already at max 5 cooks"
 				return m, nil
 			}
+			stateMu.Lock()
+			stateWant = m.cur.want + 1
+			stateMu.Unlock()
 			return m, kctl("scaled up", "scale", "deploy/cook", fmt.Sprintf("--replicas=%d", m.cur.want+1))
 		case "-", "_":
 			if m.cur.want <= 0 {
 				m.notice = "already at 0 cooks"
 				return m, nil
 			}
+			stateMu.Lock()
+			stateWant = m.cur.want - 1
+			stateMu.Unlock()
 			return m, kctl("scaled down", "scale", "deploy/cook", fmt.Sprintf("--replicas=%d", m.cur.want-1))
 		case "R":
 			return m, kctl("restarted cooks", "rollout", "restart", "deploy/cook")
@@ -674,7 +693,9 @@ func main() {
 	ti.Placeholder = "mie ayam…"
 	ti.CharLimit = 64
 	ti.Width = 40
-	if _, err := tea.NewProgram(model{api: api, user: user, pass: pass, amqpURL: amqpURL, input: ti, loading: true}).Run(); err != nil {
+	p := tea.NewProgram(model{api: api, user: user, pass: pass, amqpURL: amqpURL, input: ti, loading: true})
+	go listenState(amqpURL, p.Send)
+	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
 		os.Exit(1)
 	}

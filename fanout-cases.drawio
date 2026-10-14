@@ -141,4 +141,51 @@
       </root>
     </mxGraphModel>
   </diagram>
+  <diagram name="state-fanout" id="state-fanout">
+    <mxGraphModel dx="800" dy="500" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="760">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="&lt;b&gt;Fanout 4 — state announcer (clients listen, never kubectl)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#ffffff;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="1080" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="&lt;b&gt;Cook&lt;/b&gt;&#xa;publish cooking → idle&#xa;{pod, order, prep}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="10" value="&lt;b&gt;Waiter&lt;/b&gt;&#xa;publish delivering →&#xa;served → ready" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="230" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="4" value="&lt;b&gt;Exchange kitchen.state&lt;/b&gt;&#xa;type=fanout&#xa;key ignored" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="260" y="90" width="180" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="&lt;b&gt;TUI&lt;/b&gt;&#xa;ephemeral queue&#xa;live cooks + waiter" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="480" y="60" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="&lt;b&gt;WPF&lt;/b&gt;&#xa;ephemeral queue&#xa;live cooks + waiter" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="480" y="160" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="7" value="&lt;b&gt;future screen&lt;/b&gt;&#xa;ephemeral queue&#xa;no kubectl needed" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="480" y="260" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="9" value="&lt;b&gt;Rule:&lt;/b&gt; state reads via fanout (no wsl, no kubectl logs) · queue counts still via RabbitMQ API · kubectl writes only (kill/scale/restart) · deploy want/ready derived client-side (pods seen + last scale)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="480" width="1080" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="20" value="publish" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" edge="1" parent="1" source="3" target="4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="25" value="publish" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" edge="1" parent="1" source="10" target="4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="21" value="copy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" edge="1" parent="1" source="4" target="5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="copy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" edge="1" parent="1" source="4" target="6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="copy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" edge="1" parent="1" source="4" target="7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
 </mxfile>

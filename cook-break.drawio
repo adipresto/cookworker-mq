@@ -101,10 +101,10 @@
         <mxCell id="55" value="&lt;b&gt;Queue done&lt;/b&gt;&#xa;durable, persistent&#xa;rk=done, id=orderId" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
           <mxGeometry x="920" y="90" width="200" height="110" as="geometry" />
         </mxCell>
-        <mxCell id="56" value="&lt;b&gt;Cook order:&lt;/b&gt; process → publish done (persistent) → Ack orders · crash between = redelivery → waiter dedupes by orderId" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+        <mxCell id="56" value="&lt;b&gt;Cook order:&lt;/b&gt; publish kitchen.state cooking → process → publish done (persistent) → Ack orders + publish kitchen.state idle · crash between = redelivery → waiter dedupes by orderId" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
           <mxGeometry x="40" y="260" width="1080" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="57" value="&lt;b&gt;Waiter order:&lt;/b&gt; publish + keep serving → done arrives in bg → Ack done · no block, no reply_to, no RPC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+        <mxCell id="57" value="&lt;b&gt;Waiter order:&lt;/b&gt; publish + keep serving → done arrives in bg → publish kitchen.state delivering/served/ready → Ack done · no block, no reply_to, no RPC · TUI/WPF listen kitchen.state, never kubectl logs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
           <mxGeometry x="40" y="340" width="1080" height="60" as="geometry" />
         </mxCell>
         <mxCell id="60" value="publish orders {id}" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;" edge="1" parent="1" source="51" target="52">
