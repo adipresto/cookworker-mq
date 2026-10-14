@@ -272,6 +272,7 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 }
 
 func main() {
+	loadDotEnv()
 	url := env("AMQP_URL", "amqp://guest:guest@172.28.144.1:5672/")
 	requests := env("REQUESTS_QUEUE", "requests")
 	orders := env("ORDERS_QUEUE", "orders")

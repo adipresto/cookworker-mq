@@ -2,5 +2,6 @@
 /bin/
 /app
 graphify-out/
+.env
 kitchen-wpf/bin/
 kitchen-wpf/obj/

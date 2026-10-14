@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -18,12 +19,13 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        LoadDotEnv();
         _svc = new KitchenService(
-            Env("RABBIT_API", "http://localhost:15672"),
-            Env("RABBIT_USER", "guest"),
-            Env("RABBIT_PASS", "guest"),
-            Env("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
-            Env("MANAGER_URL", "http://172.28.151.33:30080"));
+            Env("RABBIT_API"),
+            Env("RABBIT_USER"),
+            Env("RABBIT_PASS"),
+            Env("AMQP_URL"),
+            Env("MANAGER_URL"));
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
         _svc.StartStateListener(() => Dispatcher.InvokeAsync(RefreshAsync));
@@ -31,8 +33,35 @@ public partial class MainWindow : Window
         KeyDown += OnKey;
     }
 
-    private static string Env(string k, string def) =>
-        string.IsNullOrEmpty(Environment.GetEnvironmentVariable(k)) ? def : Environment.GetEnvironmentVariable(k)!;
+    // .env walk-up: exe runs from bin/..., repo root holds .env. Real env wins.
+    private static void LoadDotEnv()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            var f = Path.Combine(dir.FullName, ".env");
+            if (File.Exists(f)) { ParseDotEnv(f); return; }
+            dir = dir.Parent;
+        }
+    }
+
+    private static void ParseDotEnv(string path)
+    {
+        foreach (var raw in File.ReadAllLines(path))
+        {
+            var ln = raw.Trim();
+            if (ln == "" || ln.StartsWith('#')) continue;
+            if (ln.StartsWith("export ")) ln = ln["export ".Length..].Trim();
+            var i = ln.IndexOf('=');
+            if (i <= 0) continue;
+            var k = ln[..i].Trim();
+            var v = ln[(i + 1)..].Trim().Trim('\'', '"');
+            if (k != "" && string.IsNullOrEmpty(Environment.GetEnvironmentVariable(k)))
+                Environment.SetEnvironmentVariable(k, v);
+        }
+    }
+
+    private static string Env(string k) => Environment.GetEnvironmentVariable(k) ?? "";
 
     private void OnKey(object sender, KeyEventArgs e)
     {

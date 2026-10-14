@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -66,6 +67,34 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// loadDotEnv fills missing process env from .env in cwd. Own copy:
+// tui.go builds standalone (`go run tui.go`), shared config.go not included.
+// Real env wins; connection vars below pass "" so nothing is hardcoded here.
+func loadDotEnv() {
+	f, err := os.Open(".env")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		ln := strings.TrimSpace(sc.Text())
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		ln = strings.TrimSpace(strings.TrimPrefix(ln, "export "))
+		k, v, ok := strings.Cut(ln, "=")
+		k = strings.TrimSpace(k)
+		if !ok || k == "" {
+			continue
+		}
+		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"'`))
+		if os.Getenv(k) == "" {
+			os.Setenv(k, v)
+		}
+	}
 }
 
 func getQueue(api, user, pass, q string) (qstat, error) {
@@ -711,11 +740,12 @@ func (m model) View() string {
 }
 
 func main() {
+	loadDotEnv()
 	once := flag.Bool("once", false, "print one snapshot, no TUI")
 	flag.Parse()
-	api, user, pass := getenv("RABBIT_API", "http://localhost:15672"), getenv("RABBIT_USER", "guest"), getenv("RABBIT_PASS", "guest")
-	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
-	managerURL := getenv("MANAGER_URL", "http://172.28.151.33:30080")
+	api, user, pass := getenv("RABBIT_API", ""), getenv("RABBIT_USER", ""), getenv("RABBIT_PASS", "")
+	amqpURL := getenv("AMQP_URL", "")
+	managerURL := getenv("MANAGER_URL", "")
 	if *once {
 		s := fetch(api, user, pass, managerURL)
 		fmt.Printf("requests=%d orders: Ready=%d Unacked=%d | done: Ready=%d Unacked=%d\n", s.requests.Ready, s.orders.Ready, s.orders.Unack, s.done.Ready, s.done.Unack)
