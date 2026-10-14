@@ -278,6 +278,16 @@ func main() {
 	done := env("DONE_QUEUE", "done")
 	role := env("ROLE", "cook")
 
+	// Manager needs no broker: straight to HTTP, retry in-process like the rest.
+	if role == "manager" {
+		for {
+			if err := runManager(); err != nil {
+				log.Printf("manager: %v (retry in 5s)", err)
+				time.Sleep(5 * time.Second)
+			}
+		}
+	}
+
 	// SIGTERM (k3s) closes the live conn (Unacked -> Ready, sibling retries),
 	// then the process dies. Anything else is a broker blip: redial in-process.
 	var mu sync.Mutex

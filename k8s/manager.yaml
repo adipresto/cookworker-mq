@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: manager
+  namespace: kitchen
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager
+  namespace: kitchen
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "delete", "deletecollection"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: manager
+  namespace: kitchen
+subjects:
+- kind: ServiceAccount
+  name: manager
+roleRef:
+  kind: Role
+  name: manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manager
+  namespace: kitchen
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single HTTP owner, like waiter
+  selector:
+    matchLabels: { app: manager }
+  template:
+    metadata:
+      labels: { app: manager }
+    spec:
+      serviceAccountName: manager
+      containers:
+      - name: manager
+        image: ghcr.io/adipresto/cookworker-mq:main
+        imagePullPolicy: Always
+        ports:
+        - { containerPort: 8080 }
+        env:
+        - { name: ROLE, value: manager }
+---
+# NodePort so Windows clients reach it via the WSL gateway IP, same as the broker.
+apiVersion: v1
+kind: Service
+metadata:
+  name: manager
+  namespace: kitchen
+spec:
+  type: NodePort
+  selector: { app: manager }
+  ports:
+  - { port: 8080, targetPort: 8080, nodePort: 30080 }

@@ -167,7 +167,7 @@
         <mxCell id="7" value="&lt;b&gt;future screen&lt;/b&gt;&#xa;ephemeral queue&#xa;no kubectl needed" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
           <mxGeometry x="480" y="260" width="220" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="9" value="&lt;b&gt;Rule:&lt;/b&gt; state reads via fanout (no wsl, no kubectl logs) · queue counts still via RabbitMQ API · kubectl writes only (kill/scale/restart) · deploy want/ready derived client-side (pods seen + last scale)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+        <mxCell id="9" value="&lt;b&gt;Rule:&lt;/b&gt; state reads via fanout (no wsl, no kubectl logs) · queue counts still via RabbitMQ API · live pods + kill/scale/restart via Manager service (ROLE=manager, NodePort 30080) · deploy want/ready derived client-side (pods seen + last scale)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
           <mxGeometry x="40" y="480" width="1080" height="60" as="geometry" />
         </mxCell>
         <mxCell id="20" value="publish" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" edge="1" parent="1" source="3" target="4">

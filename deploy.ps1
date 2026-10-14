@@ -19,7 +19,9 @@ wsl -d $Distro -- sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n kitchen
   wsl -d $Distro -- sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f -
 k apply -f "$wslPath/k8s/cook.yaml"
 k apply -f "$wslPath/k8s/waiter.yaml"
-k rollout restart deploy/cook deploy/waiter -n kitchen # :main tag never changes, apply alone is a no-op
+k apply -f "$wslPath/k8s/manager.yaml"
+k rollout restart deploy/cook deploy/waiter deploy/manager -n kitchen # :main tag never changes, apply alone is a no-op
 k rollout status deploy/cook -n kitchen --timeout=120s
 k rollout status deploy/waiter -n kitchen --timeout=120s
+k rollout status deploy/manager -n kitchen --timeout=120s
 k get pods -n kitchen

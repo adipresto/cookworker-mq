@@ -6,6 +6,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="150"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -60,13 +61,17 @@
                 </GroupBox>
             </StackPanel>
         </Grid>
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,4">
+        <GroupBox Header="TERMINAL — kitchen.state live (no kubectl)" Grid.Row="2" Margin="0,0,0,4">
+            <TextBox x:Name="TerminalBox" FontFamily="Consolas" IsReadOnly="True"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+        </GroupBox>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,4">
             <TextBox x:Name="OrderBox" Width="350" Margin="0,0,8,0" ToolTip="mie ayam…"/>
             <Button Content="Order" Click="Order_Click" Padding="12,2" Margin="0,0,4,0"/>
             <Button Content="Menu (A)" Click="Menu_Click" Margin="0,0,4,0"/>
             <Button Content="Alarm (N)" Click="Alarm_Click"/>
         </StackPanel>
-        <StackPanel Grid.Row="3">
+        <StackPanel Grid.Row="4">
             <TextBlock x:Name="NoticeText" FontWeight="Bold" TextWrapping="Wrap"/>
             <TextBlock x:Name="ErrorText" Foreground="Red" TextWrapping="Wrap"/>
             <TextBlock Text="o order · A/N broadcast · x kill · X kill all · +/- scale · R restart · r refresh" Foreground="Gray"/>

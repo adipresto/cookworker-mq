@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -260,9 +259,53 @@ func listenState(amqpURL string, send func(tea.Msg)) {
 	}
 }
 
-// State reads come from kitchen.state fanout (see listenState/applyState).
-// kctl below is ACTIONS only (x/X/+/-/R): writes still need kubectl.
-func fetch(api, user, pass string) snapshot {
+// podInfo mirrors Manager GET /pods: the live view, no kubectl on clients.
+type podInfo struct {
+	Name     string `json:"name"`
+	App      string `json:"app"`
+	Phase    string `json:"phase"`
+	Ready    bool   `json:"ready"`
+	Restarts int    `json:"restarts"`
+	Age      string `json:"age"`
+}
+
+func getPods(managerURL string) ([]podInfo, error) {
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(strings.TrimRight(managerURL, "/") + "/pods")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("manager: %s", strings.TrimSpace(string(raw)))
+	}
+	var pods []podInfo
+	return pods, json.Unmarshal(raw, &pods)
+}
+
+// mgrPost fires one Manager action. POST with optional JSON body.
+func mgrPost(managerURL, path string, body any) (string, error) {
+	var r io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		r = bytes.NewReader(b)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Post(strings.TrimRight(managerURL, "/")+path, "application/json", r)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("%s", strings.TrimSpace(string(raw)))
+	}
+	return strings.TrimSpace(string(raw)), nil
+}
+
+// State reads come from kitchen.state fanout (see listenState/applyState)
+// plus Manager GET /pods for the live list. kctl below is ACTIONS only,
+// over HTTP now: zero wsl, zero kubectl on clients.
+func fetch(api, user, pass, managerURL string) snapshot {
 	s := snapshot{at: time.Now()}
 	var errs []string
 	for _, q := range []string{"requests", "orders", "done"} {
@@ -280,19 +323,37 @@ func fetch(api, user, pass string) snapshot {
 			s.done = st
 		}
 	}
-	stateMu.Lock()
-	for _, c := range stateCooks {
-		cp := *c
-		s.cooks = append(s.cooks, cp)
+	// Live pods from Manager; hot state (cooking countdown) overlaid from fanout store.
+	pods, err := getPods(managerURL)
+	if err != nil {
+		errs = append(errs, err.Error())
+	} else {
+		stateMu.Lock()
+		ready := 0
+		for _, p := range pods {
+			if p.App != "cook" {
+				continue
+			}
+			c := cookStat{pod: shortPod(p.Name), full: p.Name}
+			if st, ok := stateCooks[p.Name]; ok {
+				c = *st // fanout hot state wins
+				c.pod, c.full = shortPod(p.Name), p.Name
+			} else if p.Phase != "Running" {
+				c.line = strings.ToLower(p.Phase)
+			}
+			s.cooks = append(s.cooks, c)
+			if p.Ready {
+				ready++
+			}
+		}
+		s.waiter = append([]string(nil), stateWaiter...)
+		s.want = stateWant
+		if s.want == 0 {
+			s.want = len(s.cooks)
+		}
+		s.readyN = fmt.Sprintf("%d/%d", ready, s.want)
+		stateMu.Unlock()
 	}
-	s.waiter = append([]string(nil), stateWaiter...)
-	s.want = stateWant
-	if s.want == 0 {
-		s.want = len(s.cooks)
-	}
-	ready := len(s.cooks)
-	s.readyN = fmt.Sprintf("%d/%d", ready, s.want)
-	stateMu.Unlock()
 	s.waiting = peekQueue(api, user, pass, "orders", 20)
 	s.ready = peekQueue(api, user, pass, "done", 20)
 	s.alerts = peekQueue(api, user, pass, "notify-tui", 10)
@@ -385,31 +446,30 @@ type actionMsg struct {
 	err error
 }
 
-// kctl runs kubectl in WSL with no shell (avoids wsl.exe $var forwarding loss).
-func kctl(note string, args ...string) tea.Cmd {
+// kctl asks Manager over HTTP. No wsl, no kubectl on clients.
+func (m model) kctl(note, path string, body any) tea.Cmd {
 	return func() tea.Msg {
-		full := append([]string{"-d", "NixOS", "--", "sudo", "kubectl", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml", "-n", "kitchen"}, args...)
-		if out, err := exec.Command("wsl", full...).CombinedOutput(); err != nil {
-			return actionMsg{err: fmt.Errorf("%s", strings.TrimSpace(string(out)))}
+		if _, err := mgrPost(m.managerURL, path, body); err != nil {
+			return actionMsg{err: err}
 		}
 		return actionMsg{msg: note}
 	}
 }
 
 type model struct {
-	api, user, pass, amqpURL string
-	cur                      snapshot
-	input                    textinput.Model
-	typing                   bool
-	loading                  bool
-	notice                   string
-	sel                      int // selected cook
+	api, user, pass, amqpURL, managerURL string
+	cur                                  snapshot
+	input                                textinput.Model
+	typing                               bool
+	loading                              bool
+	notice                               string
+	sel                                  int // selected cook
 }
 
 func (m model) Init() tea.Cmd { return m.refresh }
 
 func (m model) refresh() tea.Msg {
-	return dataMsg{s: fetch(m.api, m.user, m.pass)}
+	return dataMsg{s: fetch(m.api, m.user, m.pass, m.managerURL)}
 }
 
 func (m model) send() tea.Msg {
@@ -506,9 +566,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			c := m.cur.cooks[m.sel]
-			return m, kctl("killed "+c.pod, "delete", "pod/"+c.full, "--wait=false")
+			return m, m.kctl("killed "+c.pod, "/cooks/kill", map[string]string{"pod": c.full})
 		case "X":
-			return m, kctl("killed all cooks", "delete", "pods", "-l", "app=cook", "--wait=false")
+			return m, m.kctl("killed all cooks", "/cooks/kill-all", nil)
 		case "+", "=":
 			if m.cur.want >= 5 {
 				m.notice = "already at max 5 cooks"
@@ -517,7 +577,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			stateMu.Lock()
 			stateWant = m.cur.want + 1
 			stateMu.Unlock()
-			return m, kctl("scaled up", "scale", "deploy/cook", fmt.Sprintf("--replicas=%d", m.cur.want+1))
+			return m, m.kctl("scaled up", "/cooks/scale", map[string]int{"replicas": m.cur.want + 1})
 		case "-", "_":
 			if m.cur.want <= 0 {
 				m.notice = "already at 0 cooks"
@@ -526,9 +586,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			stateMu.Lock()
 			stateWant = m.cur.want - 1
 			stateMu.Unlock()
-			return m, kctl("scaled down", "scale", "deploy/cook", fmt.Sprintf("--replicas=%d", m.cur.want-1))
+			return m, m.kctl("scaled down", "/cooks/scale", map[string]int{"replicas": m.cur.want - 1})
 		case "R":
-			return m, kctl("restarted cooks", "rollout", "restart", "deploy/cook")
+			return m, m.kctl("restarted cooks", "/cooks/restart", nil)
 		}
 	}
 	return m, nil
@@ -655,8 +715,9 @@ func main() {
 	flag.Parse()
 	api, user, pass := getenv("RABBIT_API", "http://localhost:15672"), getenv("RABBIT_USER", "guest"), getenv("RABBIT_PASS", "guest")
 	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
+	managerURL := getenv("MANAGER_URL", "http://172.28.144.1:30080")
 	if *once {
-		s := fetch(api, user, pass)
+		s := fetch(api, user, pass, managerURL)
 		fmt.Printf("requests=%d orders: Ready=%d Unacked=%d | done: Ready=%d Unacked=%d\n", s.requests.Ready, s.orders.Ready, s.orders.Unack, s.done.Ready, s.done.Unack)
 		fmt.Printf("cook deploy: %s ready (want %d)\n", s.readyN, s.want)
 		fmt.Printf("waiting (%d):\n", s.orders.Ready)
@@ -693,7 +754,7 @@ func main() {
 	ti.Placeholder = "mie ayam…"
 	ti.CharLimit = 64
 	ti.Width = 40
-	p := tea.NewProgram(model{api: api, user: user, pass: pass, amqpURL: amqpURL, input: ti, loading: true})
+	p := tea.NewProgram(model{api: api, user: user, pass: pass, amqpURL: amqpURL, managerURL: managerURL, input: ti, loading: true})
 	go listenState(amqpURL, p.Send)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -64,6 +63,7 @@ public class Snapshot
     public List<OrderItem> Waiting { get; set; } = [];
     public List<OrderItem> Ready { get; set; } = [];
     public List<OrderItem> Alerts { get; set; } = [];
+    public List<string> Terminal { get; set; } = []; // event-sourced log lines, newest last
     public int Want { get; set; }
     public string ReadyN { get; set; } = "";
     public DateTime At { get; set; } = DateTime.Now;
@@ -79,12 +79,21 @@ public record StateEvent(
     [property: JsonPropertyName("prep")] string Prep = "",
     [property: JsonPropertyName("at")] string At = "");
 
-public class KitchenService(string api, string user, string pass, string amqpUrl)
+public record PodInfo(
+    [property: JsonPropertyName("name")] string Name = "",
+    [property: JsonPropertyName("app")] string App = "",
+    [property: JsonPropertyName("phase")] string Phase = "",
+    [property: JsonPropertyName("ready")] bool Ready = false,
+    [property: JsonPropertyName("restarts")] int Restarts = 0,
+    [property: JsonPropertyName("age")] string Age = "");
+
+public class KitchenService(string api, string user, string pass, string amqpUrl, string managerUrl)
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
     private readonly object _stateLock = new();
     private readonly Dictionary<string, CookStat> _stateCooks = new();
     private readonly List<string> _stateWaiter = [];
+    private readonly List<string> _terminal = []; // ponytail: 200-line cap, full log viewer if this ever matters
     private int _stateWant;
 
     private HttpRequestMessage Req(HttpMethod m, string path, HttpContent? c = null)
@@ -125,8 +134,9 @@ public class KitchenService(string api, string user, string pass, string amqpUrl
         return out_;
     }
 
-    // State reads come from kitchen.state fanout (see StartStateListener).
-    // KctlAsync below is ACTIONS only: writes still need kubectl.
+    // State reads come from kitchen.state fanout (see StartStateListener)
+    // plus Manager GET /pods for the live list. Actions below go to Manager
+    // over HTTP: zero wsl, zero kubectl on clients.
     public async Task<Snapshot> FetchAsync()
     {
         var s = new Snapshot { At = DateTime.Now };
@@ -142,13 +152,31 @@ public class KitchenService(string api, string user, string pass, string amqpUrl
             }
             catch (Exception ex) { errs.Add($"{q}: {ex.Message}"); }
         }
-        lock (_stateLock)
+        try
         {
-            s.Cooks = _stateCooks.Values.ToList();
-            s.Waiter = [.. _stateWaiter];
-            s.Want = _stateWant == 0 ? _stateCooks.Count : _stateWant;
-            s.ReadyN = $"{_stateCooks.Count}/{s.Want}";
+            var pods = await GetPodsAsync();
+            lock (_stateLock)
+            {
+                int ready = 0;
+                foreach (var p in pods.Where(p => p.App == "cook"))
+                {
+                    var c = new CookStat { Pod = ShortPod(p.Name), Full = p.Name };
+                    if (_stateCooks.TryGetValue(p.Name, out var st))
+                    {
+                        c.State = st.State; c.Order = st.Order; c.Value = st.Value;
+                        c.Start = st.Start; c.Prep = st.Prep; c.Line = st.Line;
+                    }
+                    else if (p.Phase != "Running") c.Line = p.Phase.ToLower();
+                    s.Cooks.Add(c);
+                    if (p.Ready) ready++;
+                }
+                s.Waiter = [.. _stateWaiter];
+                s.Terminal = [.. _terminal];
+                s.Want = _stateWant == 0 ? s.Cooks.Count : _stateWant;
+                s.ReadyN = $"{ready}/{s.Want}";
+            }
         }
+        catch (Exception ex) { errs.Add("manager: " + ex.Message); }
         try
         {
             s.Waiting = await PeekQueueAsync("orders", 20);
@@ -170,6 +198,7 @@ public class KitchenService(string api, string user, string pass, string amqpUrl
             System.Globalization.DateTimeStyles.None, out var at)) at = DateTime.Now;
         lock (_stateLock)
         {
+            Term(e);
             if (e.Role == "cook")
             {
                 if (!_stateCooks.TryGetValue(e.Pod, out var c))
@@ -194,6 +223,15 @@ public class KitchenService(string api, string user, string pass, string amqpUrl
                 while (_stateWaiter.Count > 6) _stateWaiter.RemoveAt(0);
             }
         }
+    }
+
+    // Terminal line shaped like a container log. One shared formatter = one place to change.
+    private void Term(StateEvent e)
+    {
+        var what = string.IsNullOrEmpty(e.Value) ? OrderItem.ShortId(e.Order ?? "") : $"\"{e.Value}\"";
+        var prep = string.IsNullOrEmpty(e.Prep) ? "" : $" ({e.Prep})";
+        _terminal.Add($"{e.At} {ShortPod(e.Pod)}/{e.Role} {e.State} {what}{prep}".Trim());
+        while (_terminal.Count > 200) _terminal.RemoveAt(0);
     }
 
     // Go durations like "45s", "1m30s". TimeSpan.TryParse can't read them.
@@ -246,22 +284,37 @@ public class KitchenService(string api, string user, string pass, string amqpUrl
     // kctl runs kubectl in WSL. ACTIONS only (kill/scale/restart writes);
     // state reads come from kitchen.state fanout, never kubectl.
 
-    public static async Task<(string action, string error)> KctlAsync(string note, params string[] args)
+    public async Task<List<PodInfo>> GetPodsAsync()
     {
-        var full = new[] { "-d", "NixOS", "--", "sudo", "kubectl", "--kubeconfig",
-            "/etc/rancher/k3s/k3s.yaml", "-n", "kitchen" }.Concat(args).ToArray();
-        var (code, out_) = await RunAsync("wsl", full);
-        return code == 0 ? (note, "") : ("", out_.Trim());
+        using var r = await _http.GetAsync(managerUrl.TrimEnd('/') + "/pods");
+        var body = await r.Content.ReadAsStringAsync();
+        r.EnsureSuccessStatusCode();
+        return JsonSerializer.Deserialize<List<PodInfo>>(body) ?? [];
     }
 
-    private static async Task<(int code, string output)> RunAsync(string exe, string[] args)
+    private async Task<string> MgrPostAsync(string path, object? body)
     {
-        var psi = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-        foreach (var a in args) psi.ArgumentList.Add(a);
-        using var p = Process.Start(psi)!;
-        var output = await p.StandardOutput.ReadToEndAsync() + await p.StandardError.ReadToEndAsync();
-        await p.WaitForExitAsync();
-        return (p.ExitCode, output);
+        using var r = await _http.PostAsync(managerUrl.TrimEnd('/') + path,
+            new StringContent(JsonSerializer.Serialize(body ?? new { }), Encoding.UTF8, "application/json"));
+        var text = await r.Content.ReadAsStringAsync();
+        if (!r.IsSuccessStatusCode) throw new HttpRequestException(text.Trim());
+        return text.Trim();
+    }
+
+    // Manager actions. Replies land in the terminal like kubectl output did.
+    public async Task<(string action, string error)> MgrAsync(string note, string path, object? body)
+    {
+        string out_;
+        try { out_ = await MgrPostAsync(path, body); }
+        catch (Exception ex) { return ("", ex.Message); }
+        var line = $"$ POST {path}" + (body == null ? "" : " " + JsonSerializer.Serialize(body));
+        lock (_stateLock)
+        {
+            _terminal.Add(line);
+            if (!string.IsNullOrEmpty(out_)) _terminal.Add(out_.Length > 160 ? out_[..159] + "…" : out_);
+            while (_terminal.Count > 200) _terminal.RemoveAt(0);
+        }
+        return (note, "");
     }
 
     private static string ShortPod(string p) => p.Contains('-') ? p[(p.LastIndexOf('-') + 1)..] : p;

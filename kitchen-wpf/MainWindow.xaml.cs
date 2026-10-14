@@ -22,7 +22,8 @@ public partial class MainWindow : Window
             Env("RABBIT_API", "http://localhost:15672"),
             Env("RABBIT_USER", "guest"),
             Env("RABBIT_PASS", "guest"),
-            Env("AMQP_URL", "amqp://guest:guest@localhost:5672/"));
+            Env("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+            Env("MANAGER_URL", "http://172.28.144.1:30080"));
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
         _svc.StartStateListener(() => Dispatcher.InvokeAsync(RefreshAsync));
@@ -69,6 +70,8 @@ public partial class MainWindow : Window
             CooksList.ItemsSource = _cur.Cooks.Select(c => c.ToString()).ToList();
             if (CooksList.Items.Count > 0) CooksList.SelectedIndex = Math.Clamp(sel < 0 ? 0 : sel, 0, CooksList.Items.Count - 1);
             WaiterText.Text = _cur.Waiter.Count == 0 ? "(nothing yet)" : string.Join("\n", _cur.Waiter);
+            TerminalBox.Text = string.Join("\n", _cur.Terminal);
+            TerminalBox.ScrollToEnd();
             ErrorText.Text = string.IsNullOrEmpty(_cur.Error) ? "" : "! " + _cur.Error;
         }
         catch (Exception ex) { ErrorText.Text = "! " + ex.Message; }
@@ -107,24 +110,24 @@ public partial class MainWindow : Window
     {
         if (CooksList.SelectedIndex < 0 || CooksList.SelectedIndex >= _cur.Cooks.Count) { Notice("no cooks to kill", false); return; }
         var c = _cur.Cooks[CooksList.SelectedIndex];
-        await RunKctl($"killed {c.Pod}", "delete", $"pod/{c.Full}", "--wait=false");
+        await RunMgr($"killed {c.Pod}", "/cooks/kill", new { pod = c.Full });
     }
 
-    private async Task KillAllAsync() => await RunKctl("killed all cooks", "delete", "pods", "-l", "app=cook", "--wait=false");
+    private async Task KillAllAsync() => await RunMgr("killed all cooks", "/cooks/kill-all", null);
 
     private async Task ScaleAsync(int delta)
     {
         var want = _cur.Want + delta;
         if (want is < 0 or > 5) { Notice(want > 5 ? "already at max 5 cooks" : "already at 0 cooks", false); return; }
         _svc.SetWant(want);
-        await RunKctl(delta > 0 ? "scaled up" : "scaled down", "scale", "deploy/cook", $"--replicas={want}");
+        await RunMgr(delta > 0 ? "scaled up" : "scaled down", "/cooks/scale", new { replicas = want });
     }
 
-    private async Task RestartAsync() => await RunKctl("restarted cooks", "rollout", "restart", "deploy/cook");
+    private async Task RestartAsync() => await RunMgr("restarted cooks", "/cooks/restart", null);
 
-    private async Task RunKctl(string note, params string[] args)
+    private async Task RunMgr(string note, string path, object? body)
     {
-        var (ok, err) = await KitchenService.KctlAsync(note, args);
+        var (ok, err) = await _svc.MgrAsync(note, path, body);
         Notice(string.IsNullOrEmpty(err) ? ok : "action failed: " + err, string.IsNullOrEmpty(err));
         await RefreshAsync();
     }
