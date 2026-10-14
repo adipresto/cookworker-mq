@@ -133,6 +133,19 @@ func runWaiter(conn *amqp.Connection, requests, orders, done string) error {
 		}
 	}
 
+	// Fanout broadcasts (menu.86 / shop.close): one inbox bound to both.
+	if _, err := pub.QueueDeclare("notify-tui", true, false, false, false, nil); err != nil {
+		return err
+	}
+	for _, ex := range []string{"menu.update", "shop.alarm"} {
+		if err := pub.ExchangeDeclare(ex, "fanout", true, false, false, false, nil); err != nil {
+			return err
+		}
+		if err := pub.QueueBind("notify-tui", "", ex, false, nil); err != nil {
+			return err
+		}
+	}
+
 	n := 0
 	take := func(value string) string {
 		n++

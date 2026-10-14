@@ -1,7 +1,7 @@
 //go:build ignore
 
 // Kitchen TUI: order like a customer, manage cooks like a boss.
-// o order · j/k select cook · x kill · X kill all · +/- scale · R restart · r refresh · q quit · -once snapshot.
+// o order · A/N broadcast menu/alarm · j/k select cook · x kill · X kill all · +/- scale · R restart · r refresh · q quit · -once snapshot.
 package main
 
 import (
@@ -55,6 +55,7 @@ type snapshot struct {
 	waiter   []string
 	waiting  []orderItem // orders queue Ready: registered, no free cook
 	ready    []orderItem // done queue Ready: cooked, waiter hasn't picked up
+	alerts   []orderItem // notify-tui inbox: menu.86 + shop.close fanout copies
 	want     int         // cook deploy desired replicas
 	readyN   string      // "ready/want" for cook deploy
 	at       time.Time
@@ -285,6 +286,7 @@ func fetch(api, user, pass string) snapshot {
 	}
 	s.waiting = peekQueue(api, user, pass, "orders", 20)
 	s.ready = peekQueue(api, user, pass, "done", 20)
+	s.alerts = peekQueue(api, user, pass, "notify-tui", 10)
 	if len(s.cooks) == 0 && len(s.waiter) == 0 {
 		errs = append(errs, "k3s: no data (namespace missing?)")
 	}
@@ -324,6 +326,35 @@ func sendRequest(amqpURL, value string) (string, error) {
 	return value, nil
 }
 
+// broadcast sends a manager notice to a fanout exchange. Exchange name is the type.
+func broadcast(amqpURL, exchange, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("empty notice")
+	}
+	conn, err := amqp.Dial(amqpURL)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	ch, err := conn.Channel()
+	if err != nil {
+		return "", err
+	}
+	defer ch.Close()
+	body, _ := json.Marshal(map[string]string{"id": fmt.Sprintf("notice-%d", time.Now().UnixNano()), "value": value})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ch.PublishWithContext(ctx, exchange, "", false, false, amqp.Publishing{
+		DeliveryMode: amqp.Persistent,
+		ContentType:  "application/json",
+		Body:         body,
+	}); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
 var (
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	boxStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 1)
@@ -336,6 +367,7 @@ type tickMsg struct{}
 type dataMsg struct{ s snapshot }
 type sentMsg struct {
 	dish string
+	kind string // "notice" for fanout broadcast, "" for order
 	err  error
 }
 type actionMsg struct {
@@ -375,6 +407,14 @@ func (m model) send() tea.Msg {
 	return sentMsg{dish: dish, err: err}
 }
 
+func (m model) announce(exchange string) tea.Msg {
+	text, err := broadcast(m.amqpURL, exchange, m.input.Value())
+	if err != nil {
+		return sentMsg{err: err}
+	}
+	return sentMsg{dish: text, kind: "notice"}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case dataMsg:
@@ -389,6 +429,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sentMsg:
 		if msg.err != nil {
 			m.notice = "send failed: " + msg.err.Error()
+		} else if msg.kind == "notice" {
+			m.notice = "broadcast " + msg.dish
+			m.input.SetValue("")
 		} else {
 			m.notice = "requested " + msg.dish
 			m.input.SetValue("")
@@ -432,6 +475,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.typing = true
 			m.notice = ""
 			return m, m.input.Focus()
+		case "A":
+			return m, func() tea.Msg { return m.announce("menu.update") }
+		case "N":
+			return m, func() tea.Msg { return m.announce("shop.alarm") }
 		case "j", "down":
 			if m.sel < len(m.cur.cooks)-1 {
 				m.sel++
@@ -535,6 +582,15 @@ func (m model) View() string {
 	s += hintStyle.Render(fmt.Sprintf("updated %s", m.cur.at.Format("15:04:05"))) + "\n"
 	s += boxStyle.Render("QUEUES\n"+qline(m.cur.requests)+"\n"+qline(m.cur.orders)+"\n"+qline(m.cur.done)) + "\n"
 	s += renderOrders(m.cur) + "\n"
+	alerts := "(none)"
+	if len(m.cur.alerts) > 0 {
+		var lines []string
+		for _, o := range m.cur.alerts {
+			lines = append(lines, "· "+orderLine(o))
+		}
+		alerts = strings.Join(lines, "\n")
+	}
+	s += boxStyle.Render("ALERTS — notify-tui (menu.86 / shop.close)\n"+alerts) + "\n"
 	cooks := "(no cooks)"
 	if len(m.cur.cooks) > 0 {
 		var lines []string
@@ -571,7 +627,7 @@ func (m model) View() string {
 	if m.loading {
 		s += hintStyle.Render("refreshing…") + "\n"
 	}
-	s += hintStyle.Render("o order · j/k select cook · x kill · X kill all · +/- scale · R restart · r refresh · q quit")
+	s += hintStyle.Render("o order · A/N broadcast · j/k select cook · x kill · X kill all · +/- scale · R restart · r refresh · q quit")
 	return s
 }
 
@@ -600,6 +656,10 @@ func main() {
 		}
 		fmt.Printf("ready for waiter (%d):\n", s.done.Ready)
 		for _, o := range s.ready {
+			fmt.Printf("  - %s\n", orderLine(o))
+		}
+		fmt.Printf("alerts (%d):\n", len(s.alerts))
+		for _, o := range s.alerts {
 			fmt.Printf("  - %s\n", orderLine(o))
 		}
 		for _, c := range s.cooks {
